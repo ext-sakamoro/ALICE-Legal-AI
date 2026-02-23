@@ -1,5 +1,5 @@
 global:
-  domain: legal-ai.alice-platform.com
+  domain: legal-ai.alicelaw.net
 frontend:
   replicas: 2
   image: legal-ai/frontend:latest
