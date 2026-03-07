@@ -1,0 +1,6 @@
+[package]
+name = "alice-legal-ai"
+version = "0.1.0"
+edition = "2021"
+description = "Legal document analysis, clause extraction, and risk scoring"
+license = "MIT OR Apache-2.0"
