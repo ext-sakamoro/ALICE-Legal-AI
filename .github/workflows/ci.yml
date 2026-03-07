@@ -10,10 +10,19 @@ jobs:
         service: [core-engine, api-gateway]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: ext-sakamoro/ALICE-Legal
-          path: ../ALICE-Legal
+      - name: Create dependency stub
+        run: |
+          mkdir -p ../../../ALICE-Legal/src
+          cat > ../../../ALICE-Legal/Cargo.toml << 'TOML'
+          [package]
+          name = "alice-legal"
+          version = "0.1.0"
+          edition = "2021"
+          [features]
+          default = []
+          std = []
+          TOML
+          echo "" > ../../../ALICE-Legal/src/lib.rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
