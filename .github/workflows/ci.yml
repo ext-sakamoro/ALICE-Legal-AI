@@ -12,8 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Create dependency stub
         run: |
-          mkdir -p ../../../ALICE-Legal/src
-          cat > ../../../ALICE-Legal/Cargo.toml << 'TOML'
+          mkdir -p ../ALICE-Legal/src
+          cat > ../ALICE-Legal/Cargo.toml << 'TOML'
           [package]
           name = "alice-legal"
           version = "0.1.0"
@@ -22,7 +22,7 @@ jobs:
           default = []
           std = []
           TOML
-          echo "" > ../../../ALICE-Legal/src/lib.rs
+          echo "" > ../ALICE-Legal/src/lib.rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
