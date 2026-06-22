@@ -37,3 +37,14 @@ jobs:
         with: { node-version: 22 }
       - run: cd frontend && npm ci || npm install
       - run: cd frontend && npm run type-check
+
+  actionlint:
+    name: actionlint (workflow YAML 検証)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_level: error
+          reporter: github-check
