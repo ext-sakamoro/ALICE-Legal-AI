@@ -121,7 +121,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok".to_string(),
         uptime_secs: uptime,
         service: "alice-legal-engine".to_string(),
-        version: "1.0.0".to_string(),
+        // health が返す版数は Cargo.toml から取る (literal は bump で drift して監視側に嘘を返す)
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
@@ -539,4 +540,21 @@ async fn main() {
         .expect("failed to bind");
 
     axum::serve(listener, app).await.expect("server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// health が名乗る版数は Cargo.toml の version と常に一致する
+    /// (literal に戻すと監視 / deploy 側が古い版数を掴む)
+    #[tokio::test]
+    async fn health_version_matches_cargo_pkg_version() {
+        let state = AppState {
+            start_time: Arc::new(Instant::now()),
+        };
+        let Json(body) = health(State(state)).await;
+        assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(body.status, "ok");
+    }
 }
