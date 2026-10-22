@@ -35,10 +35,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - run: |
-          cd frontend
-          # lockfile と package.json が乖離している場合のみ npm install に落とす
-          if ! npm ci; then npm install; fi
+      # the lock decides what is installed: a package.json that drifted from package-lock.json fails here
+      - run: cd frontend && npm ci
       - run: cd frontend && npm run type-check
 
   actionlint:
