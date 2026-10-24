@@ -15,7 +15,39 @@ jobs:
         with:
           workspaces: services/${{ matrix.service }}
       - run: cd services/${{ matrix.service }} && cargo check
-      - run: cd services/${{ matrix.service }} && cargo clippy -- -D warnings
+      - run: cd services/${{ matrix.service }} && cargo clippy --all-targets -- -D warnings
+      # the engine's tests (the other service has none): a run that executes no test fails
+      - name: Test (core-engine)
+        if: matrix.service == 'core-engine'
+        working-directory: services/core-engine
+        shell: bash
+        run: |
+          set -o pipefail
+          out=$(cargo test 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          passed=$(awk '/^test result:/ {n += $4} END {print n + 0}' <<<"$out")
+          echo "passed: $passed"
+          [ "$passed" -gt 0 ] || { echo "::error::no test ran"; exit 1; }
+  # the alice-legal-ai crate at the root (clause splitting, classification, risk, issues)
+  test-crate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Test (a run that executes no test fails)
+        shell: bash
+        run: |
+          set -o pipefail
+          out=$(cargo test 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          passed=$(awk '/^test result:/ {n += $4} END {print n + 0}' <<<"$out")
+          echo "passed: $passed"
+          [ "$passed" -gt 0 ] || { echo "::error::no test ran"; exit 1; }
+
   lint-frontend:
     runs-on: ubuntu-latest
     steps:

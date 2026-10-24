@@ -6,12 +6,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +28,7 @@ struct AnalyzeRequest {
 #[derive(Debug, Serialize)]
 struct Clause {
     id: String,
+    section: String,
     text: String,
     clause_type: String,
     risk_level: String,
@@ -130,55 +126,27 @@ async fn analyze(
     State(_state): State<AppState>,
     Json(req): Json<AnalyzeRequest>,
 ) -> Result<Json<AnalyzeResponse>, StatusCode> {
-    if req.document.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
+    // every clause and issue comes from the document: an empty one, or one without a clause, is
+    // refused rather than answered
+    let found =
+        alice_legal_ai::split_clauses(&req.document).map_err(|_| StatusCode::BAD_REQUEST)?;
     let word_count = req.document.split_whitespace().count();
-
-    // Deterministic clause extraction based on document content
-    let clauses = vec![
-        Clause {
-            id: "clause-001".to_string(),
-            text: extract_first_sentence(&req.document),
-            clause_type: "Jurisdiction".to_string(),
-            risk_level: "low".to_string(),
-        },
-        Clause {
-            id: "clause-002".to_string(),
-            text: "Limitation of liability applies to indirect damages.".to_string(),
-            clause_type: "Liability".to_string(),
-            risk_level: "high".to_string(),
-        },
-        Clause {
-            id: "clause-003".to_string(),
-            text: "Termination requires 30-day written notice.".to_string(),
-            clause_type: "Termination".to_string(),
-            risk_level: "medium".to_string(),
-        },
-    ];
-
-    let issues = vec![
-        Issue {
-            id: "issue-001".to_string(),
-            description: "Ambiguous indemnification clause detected.".to_string(),
-            severity: "high".to_string(),
-            location: "Section 4.2".to_string(),
-        },
-        Issue {
-            id: "issue-002".to_string(),
-            description: "Missing data retention policy reference.".to_string(),
-            severity: "medium".to_string(),
-            location: "Section 7".to_string(),
-        },
-    ];
-
-    // Risk score: length-based heuristic for demo
-    let risk_score = calculate_risk_score(word_count);
+    let issues = alice_legal_ai::find_issues(&found)
+        .into_iter()
+        .map(|i| Issue {
+            id: i.id,
+            description: i.description,
+            severity: risk_name(i.severity).to_string(),
+            location: i.location,
+        })
+        .collect();
+    let risk_score = alice_legal_ai::contract_risk_score(&found) / 100.0;
+    let clauses = found.into_iter().map(clause_of).collect::<Vec<_>>();
 
     info!(
         language = %req.language,
         word_count,
+        clauses = clauses.len(),
         risk_score,
         "document analyzed"
     );
@@ -241,7 +209,8 @@ async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
         TemplateInfo {
             id: "nda".to_string(),
             name: "Non-Disclosure Agreement".to_string(),
-            description: "Mutual or one-way NDA for confidential information protection.".to_string(),
+            description: "Mutual or one-way NDA for confidential information protection."
+                .to_string(),
             required_variables: vec![
                 "party_a".to_string(),
                 "party_b".to_string(),
@@ -253,7 +222,8 @@ async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
         TemplateInfo {
             id: "sla".to_string(),
             name: "Service Level Agreement".to_string(),
-            description: "SLA defining uptime guarantees, response times, and remedies.".to_string(),
+            description: "SLA defining uptime guarantees, response times, and remedies."
+                .to_string(),
             required_variables: vec![
                 "service_provider".to_string(),
                 "customer".to_string(),
@@ -265,7 +235,8 @@ async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
         TemplateInfo {
             id: "dpa".to_string(),
             name: "Data Processing Agreement".to_string(),
-            description: "GDPR-compliant DPA for data controller/processor relationships.".to_string(),
+            description: "GDPR-compliant DPA for data controller/processor relationships."
+                .to_string(),
             required_variables: vec![
                 "controller".to_string(),
                 "processor".to_string(),
@@ -288,18 +259,26 @@ async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
         TemplateInfo {
             id: "privacy".to_string(),
             name: "Privacy Policy".to_string(),
-            description: "GDPR/CCPA-compliant privacy policy for data collection disclosure.".to_string(),
+            description: "GDPR/CCPA-compliant privacy policy for data collection disclosure."
+                .to_string(),
             required_variables: vec![
                 "company_name".to_string(),
                 "contact_email".to_string(),
                 "data_collected".to_string(),
             ],
-            language_support: vec!["en".to_string(), "ja".to_string(), "de".to_string(), "fr".to_string()],
+            language_support: vec![
+                "en".to_string(),
+                "ja".to_string(),
+                "de".to_string(),
+                "fr".to_string(),
+            ],
         },
         TemplateInfo {
             id: "employment".to_string(),
             name: "Employment Agreement".to_string(),
-            description: "Standard employment contract with salary, IP assignment, and non-compete.".to_string(),
+            description:
+                "Standard employment contract with salary, IP assignment, and non-compete."
+                    .to_string(),
             required_variables: vec![
                 "employer".to_string(),
                 "employee".to_string(),
@@ -312,7 +291,8 @@ async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
         TemplateInfo {
             id: "license".to_string(),
             name: "Software License Agreement".to_string(),
-            description: "Commercial software license with usage restrictions and royalties.".to_string(),
+            description: "Commercial software license with usage restrictions and royalties."
+                .to_string(),
             required_variables: vec![
                 "licensor".to_string(),
                 "licensee".to_string(),
@@ -331,60 +311,30 @@ async fn risk_score(
     State(_state): State<AppState>,
     Json(req): Json<RiskRequest>,
 ) -> Result<Json<RiskScoreResponse>, StatusCode> {
-    if req.document.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+    let found =
+        alice_legal_ai::split_clauses(&req.document).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let overall_score = alice_legal_ai::contract_risk_score(&found) / 100.0;
+
+    // one factor per clause type the document has: its score is the highest risk among those
+    // clauses, its weight the share of the clauses it holds
+    let mut risk_factors: Vec<RiskFactor> = Vec::new();
+    for ty in CLAUSE_TYPES {
+        let of_type: Vec<&alice_legal_ai::Clause> =
+            found.iter().filter(|c| c.clause_type == ty).collect();
+        if of_type.is_empty() {
+            continue;
+        }
+        let score = of_type
+            .iter()
+            .map(|c| risk_value(c.risk_level))
+            .fold(0.0_f64, f64::max);
+        risk_factors.push(RiskFactor {
+            factor: type_name(ty).to_string(),
+            weight: of_type.len() as f64 / found.len() as f64,
+            score,
+            description: format!("{} clause(s) of this type in the document.", of_type.len()),
+        });
     }
-
-    let word_count = req.document.split_whitespace().count();
-    let doc_lower = req.document.to_lowercase();
-
-    let liability_score = if doc_lower.contains("limitation of liability") { 0.8 } else { 0.3 };
-    let indemnity_score = if doc_lower.contains("indemnif") { 0.7 } else { 0.2 };
-    let termination_score = if doc_lower.contains("terminat") { 0.5 } else { 0.4 };
-    let ip_score = if doc_lower.contains("intellectual property") || doc_lower.contains("copyright") {
-        0.6
-    } else {
-        0.2
-    };
-    let length_score = (word_count as f64 / 10_000.0).min(1.0);
-
-    let risk_factors = vec![
-        RiskFactor {
-            factor: "Liability Clauses".to_string(),
-            weight: 0.30,
-            score: liability_score,
-            description: "Provisions limiting or expanding liability exposure.".to_string(),
-        },
-        RiskFactor {
-            factor: "Indemnification".to_string(),
-            weight: 0.25,
-            score: indemnity_score,
-            description: "Obligations to compensate for losses or damages.".to_string(),
-        },
-        RiskFactor {
-            factor: "Termination Rights".to_string(),
-            weight: 0.20,
-            score: termination_score,
-            description: "Conditions and notice requirements for contract termination.".to_string(),
-        },
-        RiskFactor {
-            factor: "IP Assignment".to_string(),
-            weight: 0.15,
-            score: ip_score,
-            description: "Transfer or licensing of intellectual property rights.".to_string(),
-        },
-        RiskFactor {
-            factor: "Document Complexity".to_string(),
-            weight: 0.10,
-            score: length_score,
-            description: "Risk from ambiguity correlated with document length.".to_string(),
-        },
-    ];
-
-    let overall_score: f64 = risk_factors
-        .iter()
-        .map(|f| f.weight * f.score)
-        .sum::<f64>();
 
     let risk_level = match overall_score {
         s if s >= 0.7 => "critical",
@@ -399,7 +349,7 @@ async fn risk_score(
     info!(
         overall_score,
         risk_level = %risk_level,
-        word_count,
+        clauses = found.len(),
         "risk score computed"
     );
 
@@ -413,19 +363,59 @@ async fn risk_score(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn extract_first_sentence(text: &str) -> String {
-    text.chars()
-        .take(120)
-        .collect::<String>()
-        .trim()
-        .to_string()
+const CLAUSE_TYPES: [alice_legal_ai::ClauseType; 8] = [
+    alice_legal_ai::ClauseType::Indemnification,
+    alice_legal_ai::ClauseType::Limitation,
+    alice_legal_ai::ClauseType::Termination,
+    alice_legal_ai::ClauseType::Confidentiality,
+    alice_legal_ai::ClauseType::Ip,
+    alice_legal_ai::ClauseType::Warranty,
+    alice_legal_ai::ClauseType::Governing,
+    alice_legal_ai::ClauseType::Other,
+];
+
+fn type_name(ty: alice_legal_ai::ClauseType) -> &'static str {
+    use alice_legal_ai::ClauseType as T;
+    match ty {
+        T::Indemnification => "Indemnification",
+        T::Limitation => "Limitation of Liability",
+        T::Termination => "Termination",
+        T::Confidentiality => "Confidentiality",
+        T::Ip => "Intellectual Property",
+        T::Warranty => "Warranty",
+        T::Governing => "Governing Law",
+        T::Other => "Other",
+    }
 }
 
-fn calculate_risk_score(word_count: usize) -> f64 {
-    // Simple heuristic: longer documents have higher risk of hidden clauses
-    let base = 0.35_f64;
-    let length_factor = (word_count as f64 / 5_000.0).min(0.5);
-    (base + length_factor).min(1.0)
+fn risk_name(level: alice_legal_ai::RiskLevel) -> &'static str {
+    use alice_legal_ai::RiskLevel as R;
+    match level {
+        R::Low => "low",
+        R::Medium => "medium",
+        R::High => "high",
+        R::Critical => "critical",
+    }
+}
+
+fn risk_value(level: alice_legal_ai::RiskLevel) -> f64 {
+    use alice_legal_ai::RiskLevel as R;
+    match level {
+        R::Low => 0.1,
+        R::Medium => 0.3,
+        R::High => 0.7,
+        R::Critical => 1.0,
+    }
+}
+
+fn clause_of(c: alice_legal_ai::Clause) -> Clause {
+    Clause {
+        id: c.id,
+        section: c.section,
+        clause_type: type_name(c.clause_type).to_string(),
+        risk_level: risk_name(c.risk_level).to_string(),
+        text: c.text,
+    }
 }
 
 fn get_template_body(template_id: &str) -> Option<String> {
@@ -471,7 +461,12 @@ fn get_template_body(template_id: &str) -> Option<String> {
 fn get_required_variables(template_id: &str) -> Vec<String> {
     match template_id {
         "nda" => vec!["party_a", "party_b", "effective_date", "jurisdiction"],
-        "sla" => vec!["service_provider", "customer", "uptime_percent", "response_time_hours"],
+        "sla" => vec![
+            "service_provider",
+            "customer",
+            "uptime_percent",
+            "response_time_hours",
+        ],
         "dpa" => vec!["controller", "processor", "data_types", "retention_period"],
         "tos" => vec!["company_name", "product_name", "governing_law"],
         "privacy" => vec!["company_name", "contact_email", "data_collected"],
@@ -501,9 +496,7 @@ fn build_recommendations(risk_level: &str) -> Vec<String> {
             "Verify jurisdiction and governing law aligns with your location.".to_string(),
             "Confirm data retention periods meet regulatory requirements.".to_string(),
         ],
-        _ => vec![
-            "Document appears low risk. Standard review recommended.".to_string(),
-        ],
+        _ => vec!["Document appears low risk. Standard review recommended.".to_string()],
     }
 }
 
@@ -556,5 +549,107 @@ mod tests {
         let Json(body) = health(State(state)).await;
         assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(body.status, "ok");
+    }
+
+    fn state() -> State<AppState> {
+        State(AppState {
+            start_time: Arc::new(Instant::now()),
+        })
+    }
+
+    const NO_INDEMNIFICATION: &str =
+        "1. Confidentiality. Each party keeps the other's information confidential.\n\
+        2. Termination. Either party may terminate on material breach.\n\
+        3. Governing law. This Agreement is governed by the laws of Japan.\n";
+
+    fn collapsed(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// every clause and issue comes from the document: nothing is reported that it does not hold
+    #[tokio::test]
+    async fn analyze_reports_only_what_the_document_holds() {
+        let req = AnalyzeRequest {
+            document: NO_INDEMNIFICATION.to_string(),
+            language: "en".to_string(),
+        };
+        let Json(body) = analyze(state(), Json(req)).await.expect("analyzed");
+        let expected = alice_legal_ai::split_clauses(NO_INDEMNIFICATION).expect("clauses");
+        assert_eq!(body.clauses.len(), expected.len());
+        let doc = collapsed(NO_INDEMNIFICATION);
+        let sections: Vec<&str> = body.clauses.iter().map(|c| c.section.as_str()).collect();
+        assert_eq!(sections, ["1", "2", "3"]);
+        for c in &body.clauses {
+            assert!(doc.contains(&c.text), "{c:?} is not text of the document");
+        }
+        for i in &body.issues {
+            match i.location.strip_prefix("Section ") {
+                Some(section) => assert!(sections.contains(&section), "{i:?}"),
+                None => {
+                    assert_eq!(i.location, "document", "{i:?}");
+                    assert!(
+                        i.description.starts_with("No ")
+                            && i.description.ends_with(" clause found."),
+                        "{i:?}"
+                    );
+                }
+            }
+        }
+        // the document has no indemnification clause: the only indemnification issue is that it is missing
+        let about: Vec<&Issue> = body
+            .issues
+            .iter()
+            .filter(|i| i.description.to_lowercase().contains("indemnif"))
+            .collect();
+        assert_eq!(about.len(), 1, "{about:?}");
+        assert_eq!(about[0].description, "No Indemnification clause found.");
+        assert_eq!(
+            body.risk_score,
+            alice_legal_ai::contract_risk_score(&expected) / 100.0
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_refuses_a_document_without_clauses() {
+        for document in ["", "   \n", "1.\n2.\n"] {
+            let req = AnalyzeRequest {
+                document: document.to_string(),
+                language: "en".to_string(),
+            };
+            assert_eq!(
+                analyze(state(), Json(req)).await.err(),
+                Some(StatusCode::BAD_REQUEST),
+                "{document:?}"
+            );
+        }
+    }
+
+    /// the score and the factors come from the clauses: a type the document lacks has no factor
+    #[tokio::test]
+    async fn risk_score_is_computed_from_the_clauses() {
+        let req = RiskRequest {
+            document: NO_INDEMNIFICATION.to_string(),
+        };
+        let Json(body) = risk_score(state(), Json(req)).await.expect("scored");
+        let expected = alice_legal_ai::split_clauses(NO_INDEMNIFICATION).expect("clauses");
+        assert_eq!(
+            body.overall_score,
+            alice_legal_ai::contract_risk_score(&expected) / 100.0
+        );
+        let factors: Vec<&str> = body
+            .risk_factors
+            .iter()
+            .map(|f| f.factor.as_str())
+            .collect();
+        assert_eq!(factors, ["Termination", "Confidentiality", "Governing Law"]);
+        let total: f64 = body.risk_factors.iter().map(|f| f.weight).sum();
+        assert!((total - 1.0).abs() < 1e-12, "{total}");
+        let req = RiskRequest {
+            document: String::new(),
+        };
+        assert_eq!(
+            risk_score(state(), Json(req)).await.err(),
+            Some(StatusCode::BAD_REQUEST)
+        );
     }
 }

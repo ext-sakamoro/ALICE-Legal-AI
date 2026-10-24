@@ -25,8 +25,10 @@ pub mod checklist;
 pub mod classifier;
 pub mod document;
 pub mod errors;
+pub mod issues;
 pub mod prelude;
 pub mod similarity;
+pub mod splitter;
 
 #[cfg(test)]
 mod integration_tests;
@@ -35,4 +37,6 @@ pub use crate::checklist::*;
 pub use crate::classifier::*;
 pub use crate::document::*;
 pub use crate::errors::*;
+pub use crate::issues::*;
 pub use crate::similarity::*;
+pub use crate::splitter::*;

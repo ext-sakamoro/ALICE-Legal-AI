@@ -13,6 +13,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+# clause splitting, classification, risk and issues (the crate at the root of this repository)
+alice-legal-ai = { path = "../.." }
 [features]
 default = []
 [profile.release]

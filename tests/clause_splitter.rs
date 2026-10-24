@@ -182,3 +182,16 @@ fn issue_ids_are_numbered_in_order() {
         assert_eq!(issue.id, format!("issue-{:03}", n + 1));
     }
 }
+
+#[test]
+fn text_before_the_first_heading_is_the_preamble() {
+    let clauses =
+        split_clauses("This Agreement is made today.\n\n1. Term. One year.\n").expect("clauses");
+    assert_eq!(
+        sections(&clauses),
+        vec![
+            ("preamble", "This Agreement is made today."),
+            ("1", "Term. One year.")
+        ]
+    );
+}
