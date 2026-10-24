@@ -23,6 +23,9 @@ services:
   core-engine:
     build: { context: ., dockerfile: docker/Dockerfile.core-engine }
     ports: ["8081:8081"]
+    environment:
+      - LEGAL_SIGNING_SEED=${LEGAL_SIGNING_SEED:?}
+      - LEGAL_AUDIT_LOG_ID=${LEGAL_AUDIT_LOG_ID:?}
     networks: [legal-net]
   redis:
     image: redis:7-alpine

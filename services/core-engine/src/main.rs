@@ -6,15 +6,169 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroize;
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+/// The Ed25519 key that signs compiled documents, and its did:key.
+struct Signer {
+    key: alice_sign::KeyPair,
+    did: String,
+}
+
+impl fmt::Debug for Signer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Signer").field("did", &self.did).finish()
+    }
+}
+
+struct Config {
+    signer: Signer,
+    audit_log_id: u64,
+}
+
+/// Why the engine refuses to start. No variant carries the seed or any part of it.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigError {
+    MissingSeed,
+    SeedLength,
+    SeedNotHex,
+    MissingLogId,
+    LogIdNotNumber,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MissingSeed => "LEGAL_SIGNING_SEED is not set",
+            Self::SeedLength => "LEGAL_SIGNING_SEED must be 64 hex characters (a 32-byte seed)",
+            Self::SeedNotHex => "LEGAL_SIGNING_SEED must be 64 hex characters (a 32-byte seed)",
+            Self::MissingLogId => "LEGAL_AUDIT_LOG_ID is not set",
+            Self::LogIdNotNumber => "LEGAL_AUDIT_LOG_ID must be an unsigned 64-bit integer",
+        })
+    }
+}
+
+/// The configuration read through `get` (the process environment in `main`).
+///
+/// `LEGAL_SIGNING_SEED` is the 32-byte RFC 8032 secret as 64 hex characters; its text and its
+/// bytes are zeroized once the key is derived, whether or not they were valid.
+fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
+    let mut text = get("LEGAL_SIGNING_SEED").unwrap_or_default();
+    let key = seed_key(&text);
+    text.zeroize();
+    let key = key?;
+    let audit_log_id = get("LEGAL_AUDIT_LOG_ID")
+        .ok_or(ConfigError::MissingLogId)?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| ConfigError::LogIdNotNumber)?;
+    let did = alice_identity::did::Did::key_ed25519(&key.public()).to_string();
+    Ok(Config {
+        signer: Signer { key, did },
+        audit_log_id,
+    })
+}
+
+fn seed_key(text: &str) -> Result<alice_sign::KeyPair, ConfigError> {
+    let text = text.trim().as_bytes();
+    if text.is_empty() {
+        return Err(ConfigError::MissingSeed);
+    }
+    if text.len() != 64 {
+        return Err(ConfigError::SeedLength);
+    }
+    let mut seed = [0u8; 32];
+    for (i, pair) in text.chunks_exact(2).enumerate() {
+        match (nibble(pair[0]), nibble(pair[1])) {
+            (Some(h), Some(l)) => seed[i] = h << 4 | l,
+            _ => {
+                seed.zeroize();
+                return Err(ConfigError::SeedNotHex);
+            }
+        }
+    }
+    let key = alice_sign::KeyPair::from_seed(seed);
+    seed.zeroize();
+    Ok(key)
+}
+
+fn nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct AppState {
     start_time: Arc<Instant>,
+    signer: Arc<Signer>,
+    /// held in memory: it starts empty at each start of the engine
+    audit: Arc<Mutex<alice_legal::AuditLog>>,
+}
+
+impl AppState {
+    fn new(config: Config) -> Self {
+        Self {
+            start_time: Arc::new(Instant::now()),
+            signer: Arc::new(config.signer),
+            audit: Arc::new(Mutex::new(alice_legal::AuditLog::new(config.audit_log_id))),
+        }
+    }
+
+    /// Append one entry (its entity id is its sequence) and return the head after it.
+    fn record(&self, kind: alice_legal::AuditEventKind, content: &str) -> String {
+        let mut log = self.audit.lock().expect("audit log");
+        let seq = log.next_sequence;
+        log.append(kind, seq, &self.signer.did, content, now_ns());
+        hex(&log.head())
+    }
+
+    fn audit_head(&self) -> String {
+        hex(&self.audit.lock().expect("audit log").head())
+    }
+}
+
+/// The kind as the audit link names it (alice-legal `audit.rs`, `kind_tag`, which is private)
+fn kind_name(kind: alice_legal::AuditEventKind) -> &'static str {
+    use alice_legal::AuditEventKind as K;
+    match kind {
+        K::StatuteCreated => "statute-created",
+        K::StatuteAmended => "statute-amended",
+        K::ContractCreated => "contract-created",
+        K::ContractFulfilled => "contract-fulfilled",
+        K::ContractBreached => "contract-breached",
+        K::ProcedureStarted => "procedure-started",
+        K::ProcedureCompleted => "procedure-completed",
+        K::ProcedureRejected => "procedure-rejected",
+        K::DocumentAnalyzed => "document-analyzed",
+        K::TemplateCompiled => "template-compiled",
+    }
+}
+
+fn now_ns() -> u64 {
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after 1970");
+    u64::try_from(d.as_nanos()).expect("time fits in u64 nanoseconds")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -49,12 +203,31 @@ struct AnalyzeResponse {
     issues: Vec<Issue>,
     language: String,
     word_count: usize,
+    /// the audit log head after this analysis was recorded
+    audit_head: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompileRequest {
     template_id: String,
     variables: HashMap<String, String>,
+    /// the DID of the other party of the compiled document
+    counterparty_did: String,
+}
+
+/// The contract record the engine signed, with its digest, the engine public key and the
+/// Ed25519 signature over the record's canonical bytes.
+#[derive(Debug, Serialize)]
+struct SignedRecord {
+    id: String,
+    kind: String,
+    issuer_did: String,
+    counterparty_did: String,
+    effective_unix: u64,
+    metadata: BTreeMap<String, String>,
+    digest: String,
+    public_key: String,
+    signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +236,28 @@ struct CompileResponse {
     compiled_document: String,
     variables_applied: usize,
     missing_variables: Vec<String>,
+    /// present only when no variable is missing
+    signed: Option<SignedRecord>,
+    /// the audit log head after this request (unchanged when nothing was signed)
+    audit_head: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditEntryView {
+    sequence: u64,
+    kind: String,
+    entity_id: u64,
+    actor_hash: String,
+    timestamp_ns: u64,
+    content_hash: String,
+    prev_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditResponse {
+    log_id: u64,
+    head: String,
+    entries: Vec<AuditEntryView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +318,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn analyze(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<AnalyzeRequest>,
 ) -> Result<Json<AnalyzeResponse>, StatusCode> {
     // every clause and issue comes from the document: an empty one, or one without a clause, is
@@ -142,6 +337,11 @@ async fn analyze(
         .collect();
     let risk_score = alice_legal_ai::contract_risk_score(&found) / 100.0;
     let clauses = found.into_iter().map(clause_of).collect::<Vec<_>>();
+    let document_sha256 = alice_sign::hash_data(req.document.as_bytes()).to_hex();
+    let audit_head = state.record(
+        alice_legal::AuditEventKind::DocumentAnalyzed,
+        &document_sha256,
+    );
 
     info!(
         language = %req.language,
@@ -157,14 +357,18 @@ async fn analyze(
         issues,
         language: req.language,
         word_count,
+        audit_head,
     }))
 }
 
 async fn compile(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CompileRequest>,
 ) -> Result<Json<CompileResponse>, StatusCode> {
     if req.template_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if alice_identity::did::Did::parse(&req.counterparty_did).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -189,10 +393,23 @@ async fn compile(
         }
     }
 
+    // only a complete document is signed and recorded
+    let (signed, audit_head) = if missing_variables.is_empty() {
+        let signed = sign_document(&state, &req, &compiled);
+        let head = state.record(
+            alice_legal::AuditEventKind::TemplateCompiled,
+            &signed.digest,
+        );
+        (Some(signed), head)
+    } else {
+        (None, state.audit_head())
+    };
+
     info!(
         template_id = %req.template_id,
         variables_applied,
         missing = missing_variables.len(),
+        signed = signed.is_some(),
         "template compiled"
     );
 
@@ -201,7 +418,70 @@ async fn compile(
         compiled_document: compiled,
         variables_applied,
         missing_variables,
+        signed,
+        audit_head,
     }))
+}
+
+/// The record of a compiled document (its template and SHA-256 in the metadata), signed with the
+/// engine key. Its id is the audit sequence its entry takes.
+fn sign_document(state: &AppState, req: &CompileRequest, document: &str) -> SignedRecord {
+    let (log_id, seq) = {
+        let log = state.audit.lock().expect("audit log");
+        (log.log_id, log.next_sequence)
+    };
+    let effective_unix = now_ns() / 1_000_000_000;
+    let mut record = alice_legal::ContractRecord::new(
+        format!("{log_id}-{seq}"),
+        "template-compiled",
+        state.signer.did.clone(),
+        req.counterparty_did.clone(),
+        effective_unix,
+    );
+    record
+        .metadata
+        .insert("template_id".to_string(), req.template_id.clone());
+    record.metadata.insert(
+        "document_sha256".to_string(),
+        alice_sign::hash_data(document.as_bytes()).to_hex(),
+    );
+    let mut contract = alice_legal::SignedContract::new(record);
+    contract.sign(&state.signer.key);
+    let (public_key, signature) = contract.signatures[0];
+    let r = contract.record;
+    SignedRecord {
+        digest: r.digest().to_hex(),
+        id: r.id,
+        kind: r.kind,
+        issuer_did: r.issuer_did,
+        counterparty_did: r.counterparty_did,
+        effective_unix: r.effective_unix,
+        metadata: r.metadata,
+        public_key: public_key.to_hex(),
+        signature: signature.to_hex(),
+    }
+}
+
+async fn audit(State(state): State<AppState>) -> Json<AuditResponse> {
+    let log = state.audit.lock().expect("audit log");
+    let entries = log
+        .entries
+        .iter()
+        .map(|e| AuditEntryView {
+            sequence: e.sequence,
+            kind: kind_name(e.kind).to_string(),
+            entity_id: e.entity_id,
+            actor_hash: hex(&e.actor_hash),
+            timestamp_ns: e.timestamp_ns,
+            content_hash: hex(&e.content_hash),
+            prev_hash: hex(&e.prev_hash),
+        })
+        .collect();
+    Json(AuditResponse {
+        log_id: log.log_id,
+        head: hex(&log.head()),
+        entries,
+    })
 }
 
 async fn templates(State(_state): State<AppState>) -> Json<TemplatesResponse> {
@@ -502,8 +782,23 @@ fn build_recommendations(risk_level: &str) -> Vec<String> {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // the configuration is read before any thread starts; without it the engine does not start
+    let config = match config_from(|k| std::env::var(k).ok()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("legal-engine: {e}");
+            std::process::exit(2);
+        }
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(serve(config));
+}
+
+async fn serve(config: Config) {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -511,9 +806,8 @@ async fn main() {
         )
         .init();
 
-    let state = AppState {
-        start_time: Arc::new(Instant::now()),
-    };
+    info!(issuer_did = %config.signer.did, audit_log_id = config.audit_log_id, "signing key loaded");
+    let state = AppState::new(config);
 
     let app = Router::new()
         .route("/health", get(health))
@@ -521,6 +815,7 @@ async fn main() {
         .route("/api/v1/legal/compile", post(compile))
         .route("/api/v1/legal/templates", get(templates))
         .route("/api/v1/legal/risk-score", post(risk_score))
+        .route("/api/v1/legal/audit", get(audit))
         .with_state(state);
 
     let addr_str = std::env::var("LEGAL_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string());
@@ -779,7 +1074,10 @@ mod tests {
         let signed = body.signed.expect("a complete document is signed");
         assert_eq!(signed.counterparty_did, other_party());
         assert_eq!(signed.kind, "template-compiled");
-        assert_eq!(signed.metadata.get("template_id").map(String::as_str), Some("nda"));
+        assert_eq!(
+            signed.metadata.get("template_id").map(String::as_str),
+            Some("nda")
+        );
         assert_eq!(
             signed.metadata.get("document_sha256"),
             Some(&alice_sign::hash_data(body.compiled_document.as_bytes()).to_hex())
