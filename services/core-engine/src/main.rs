@@ -543,18 +543,32 @@ mod tests {
     /// (literal に戻すと監視 / deploy 側が古い版数を掴む)
     #[tokio::test]
     async fn health_version_matches_cargo_pkg_version() {
-        let state = AppState {
-            start_time: Arc::new(Instant::now()),
-        };
-        let Json(body) = health(State(state)).await;
+        let Json(body) = health(state()).await;
         assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(body.status, "ok");
     }
 
+    /// a seed made inside the test (no key or seed is kept in a fixture)
+    fn test_seed(salt: u8) -> String {
+        (0u8..32)
+            .map(|i| format!("{:02x}", i.wrapping_mul(37).wrapping_add(salt)))
+            .collect()
+    }
+
+    fn env_of(pairs: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+    }
+
+    fn config(salt: u8) -> Config {
+        config_from(env_of(vec![
+            ("LEGAL_SIGNING_SEED", test_seed(salt)),
+            ("LEGAL_AUDIT_LOG_ID", "7".to_string()),
+        ]))
+        .expect("config")
+    }
+
     fn state() -> State<AppState> {
-        State(AppState {
-            start_time: Arc::new(Instant::now()),
-        })
+        State(AppState::new(config(1)))
     }
 
     const NO_INDEMNIFICATION: &str =
@@ -651,5 +665,229 @@ mod tests {
             risk_score(state(), Json(req)).await.err(),
             Some(StatusCode::BAD_REQUEST)
         );
+    }
+
+    // ── signing key and audit log configuration ──────────────────────────────
+
+    /// the engine does not start without its signing seed and its audit log id, and no error
+    /// carries the seed text
+    #[test]
+    fn the_configuration_is_refused_without_a_seed_or_a_log_id() {
+        let seed = test_seed(3);
+        let log = || ("LEGAL_AUDIT_LOG_ID", "7".to_string());
+        let cases: Vec<(Vec<(&'static str, String)>, ConfigError)> = vec![
+            (vec![log()], ConfigError::MissingSeed),
+            (
+                vec![("LEGAL_SIGNING_SEED", String::new()), log()],
+                ConfigError::MissingSeed,
+            ),
+            (
+                vec![("LEGAL_SIGNING_SEED", seed[..62].to_string()), log()],
+                ConfigError::SeedLength,
+            ),
+            (
+                vec![("LEGAL_SIGNING_SEED", format!("{seed}00")), log()],
+                ConfigError::SeedLength,
+            ),
+            (
+                vec![("LEGAL_SIGNING_SEED", format!("{}zz", &seed[..62])), log()],
+                ConfigError::SeedNotHex,
+            ),
+            (
+                vec![("LEGAL_SIGNING_SEED", seed.clone())],
+                ConfigError::MissingLogId,
+            ),
+            (
+                vec![
+                    ("LEGAL_SIGNING_SEED", seed.clone()),
+                    ("LEGAL_AUDIT_LOG_ID", "seven".to_string()),
+                ],
+                ConfigError::LogIdNotNumber,
+            ),
+        ];
+        for (pairs, want) in cases {
+            let shown = format!("{pairs:?}");
+            let got = config_from(env_of(pairs)).err();
+            assert_eq!(got, Some(want), "{shown}");
+            let text = got.unwrap().to_string();
+            assert!(!text.contains(&seed[..16]), "{text}");
+        }
+    }
+
+    /// the key is the one the seed names, and the issuer DID is its did:key
+    #[test]
+    fn the_issuer_did_is_the_did_key_of_the_seed_key() {
+        let c = config(5);
+        let seed: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(5));
+        let pk = alice_sign::KeyPair::from_seed(seed).public();
+        assert_eq!(c.signer.key.public(), pk);
+        assert_eq!(
+            c.signer.did,
+            alice_identity::did::Did::key_ed25519(&pk).to_string()
+        );
+        assert_eq!(c.audit_log_id, 7);
+        // the key is not shown in debug output
+        assert!(!format!("{:?}", c.signer).contains(&test_seed(5)[..16]));
+    }
+
+    // ── compile signs the document and records it ────────────────────────────
+
+    fn nda(counterparty: &str) -> CompileRequest {
+        let variables = [
+            ("party_a", "Alpha KK"),
+            ("party_b", "Beta GmbH"),
+            ("effective_date", "2026-10-25"),
+            ("jurisdiction", "Japan"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        CompileRequest {
+            template_id: "nda".to_string(),
+            variables,
+            counterparty_did: counterparty.to_string(),
+        }
+    }
+
+    fn other_party() -> String {
+        let pk = alice_sign::KeyPair::from_seed([9u8; 32]).public();
+        alice_identity::did::Did::key_ed25519(&pk).to_string()
+    }
+
+    fn record_of(s: &SignedRecord) -> alice_legal::ContractRecord {
+        let mut r = alice_legal::ContractRecord::new(
+            s.id.clone(),
+            s.kind.clone(),
+            s.issuer_did.clone(),
+            s.counterparty_did.clone(),
+            s.effective_unix,
+        );
+        r.metadata = s.metadata.clone();
+        r
+    }
+
+    /// the compiled document is signed by the engine key: the signature verifies over the record,
+    /// the record carries the document's SHA-256, and the issuer DID gives back the signing key
+    #[tokio::test]
+    async fn a_complete_compile_is_signed_over_the_document() {
+        let st = state();
+        let key = st.0.signer.key.public();
+        let Json(body) = compile(st, Json(nda(&other_party())))
+            .await
+            .expect("compiled");
+        assert!(body.missing_variables.is_empty());
+        let signed = body.signed.expect("a complete document is signed");
+        assert_eq!(signed.counterparty_did, other_party());
+        assert_eq!(signed.kind, "template-compiled");
+        assert_eq!(signed.metadata.get("template_id").map(String::as_str), Some("nda"));
+        assert_eq!(
+            signed.metadata.get("document_sha256"),
+            Some(&alice_sign::hash_data(body.compiled_document.as_bytes()).to_hex())
+        );
+        let record = record_of(&signed);
+        assert_eq!(signed.digest, record.digest().to_hex());
+        let pk = alice_sign::PublicKey::from_hex(&signed.public_key).expect("public key");
+        assert_eq!(pk, key);
+        let sig = alice_sign::Signature::from_hex(&signed.signature).expect("signature");
+        assert!(pk.verify_strict(&record.canonical_bytes(), &sig));
+        let issuer = alice_identity::did::Did::parse(&signed.issuer_did).expect("a DID");
+        assert_eq!(issuer.ed25519_public_key().expect("did:key"), pk);
+        // a changed document no longer matches what was signed
+        let mut changed = record.clone();
+        changed.metadata.insert(
+            "document_sha256".to_string(),
+            alice_sign::hash_data(b"another document").to_hex(),
+        );
+        assert!(!pk.verify_strict(&changed.canonical_bytes(), &sig));
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_compile_is_not_signed_or_recorded() {
+        let st = state();
+        let mut req = nda(&other_party());
+        req.variables.remove("jurisdiction");
+        let Json(body) = compile(st.clone(), Json(req)).await.expect("compiled");
+        assert_eq!(body.missing_variables, ["jurisdiction"]);
+        assert!(body.signed.is_none());
+        assert_eq!(body.audit_head, hex(&alice_legal::AuditLog::new(7).head()));
+        let Json(log) = audit(st).await;
+        assert!(log.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_counterparty_that_is_not_a_did_is_refused() {
+        for bad in ["", "alice", "did:", "did:key"] {
+            assert_eq!(
+                compile(state(), Json(nda(bad))).await.err(),
+                Some(StatusCode::BAD_REQUEST),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// each analysis and each signed compile is one entry; every response carries the head after
+    /// its entry, and the log verifies against the last head returned
+    #[tokio::test]
+    async fn the_audit_log_records_each_analysis_and_signed_compile() {
+        let st = state();
+        let Json(a) = analyze(
+            st.clone(),
+            Json(AnalyzeRequest {
+                document: NO_INDEMNIFICATION.to_string(),
+                language: "en".to_string(),
+            }),
+        )
+        .await
+        .expect("analyzed");
+        let Json(c) = compile(st.clone(), Json(nda(&other_party())))
+            .await
+            .expect("compiled");
+        assert_ne!(a.audit_head, c.audit_head);
+        let Json(log) = audit(st.clone()).await;
+        assert_eq!(log.log_id, 7);
+        assert_eq!(log.head, c.audit_head);
+        let kinds: Vec<&str> = log.entries.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["document-analyzed", "template-compiled"]);
+        let seqs: Vec<u64> = log.entries.iter().map(|e| e.sequence).collect();
+        assert_eq!(seqs, [0, 1]);
+        assert_eq!(log.entries[1].prev_hash, a.audit_head);
+        let inner = st.0.audit.lock().expect("log");
+        assert!(inner.verify_chain(&unhex32(&c.audit_head)));
+        assert!(!inner.verify_chain(&unhex32(&a.audit_head)));
+        // the entries name what they record
+        assert_eq!(
+            inner.entries[1].content_hash,
+            alice_legal::law_id::text(
+                "alice-legal/audit-entry/content/v1",
+                &c.signed.as_ref().expect("signed").digest
+            )
+        );
+        assert_eq!(
+            inner.entries[0].content_hash,
+            alice_legal::law_id::text(
+                "alice-legal/audit-entry/content/v1",
+                &alice_sign::hash_data(NO_INDEMNIFICATION.as_bytes()).to_hex()
+            )
+        );
+    }
+
+    /// a refused request leaves no entry
+    #[tokio::test]
+    async fn a_refused_analysis_is_not_recorded() {
+        let st = state();
+        let req = AnalyzeRequest {
+            document: String::new(),
+            language: "en".to_string(),
+        };
+        assert!(analyze(st.clone(), Json(req)).await.is_err());
+        let Json(log) = audit(st).await;
+        assert!(log.entries.is_empty());
+    }
+
+    fn unhex32(s: &str) -> [u8; 32] {
+        let v: Vec<u8> = (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex"))
+            .collect();
+        v.try_into().expect("32 bytes")
     }
 }
