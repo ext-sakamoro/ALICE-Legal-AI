@@ -12,7 +12,7 @@ const features = [
   {
     title: "Template Compilation",
     description:
-      "Fill in variables to compile production-ready legal documents from ALICE-vetted templates in seconds.",
+      "Fill in variables to compile production-ready legal documents from templates in seconds.",
     icon: "🔧",
   },
   {
@@ -132,7 +132,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-white/10 px-6 py-8 text-center text-xs text-gray-600">
-        ALICE Legal AI — AGPL-3.0 — Not a substitute for qualified legal advice.
+        ALICE Legal AI — LicenseRef-Proprietary — Not a substitute for qualified legal advice.
       </footer>
     </main>
   );
