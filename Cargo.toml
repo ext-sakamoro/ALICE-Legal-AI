@@ -1,6 +1,7 @@
 [package]
 name = "alice-legal-ai"
+publish = false
 version = "0.1.0"
 edition = "2021"
 description = "Legal document analysis, clause extraction, and risk scoring"
-license = "AGPL-3.0-or-later"
+license = "LicenseRef-Proprietary"
