@@ -41,9 +41,6 @@ export default function HomePage() {
 
       {/* Hero */}
       <section className="max-w-4xl mx-auto px-6 pt-28 pb-16 text-center">
-        <div className="inline-block mb-4 px-3 py-1 rounded-full border border-violet-500/40 bg-violet-500/10 text-violet-300 text-xs tracking-widest uppercase">
-          Powered by ALICE-Legal
-        </div>
         <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight mb-6 leading-tight">
           ALICE Legal AI
         </h1>
@@ -53,7 +50,7 @@ export default function HomePage() {
           <span className="text-white">Read the law of law.</span>
         </p>
         <p className="text-gray-400 max-w-xl mx-auto mb-10">
-          AI-powered legal analysis powered by ALICE-Legal. Analyze contracts,
+          AI-powered legal analysis. Analyze contracts,
           compile templates, and surface risk factors in multiple languages
           — without a law degree.
         </p>
