@@ -62,9 +62,17 @@ async fn main() {
         )
         .init();
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.into());
+    // the secret that verifies bearer tokens has no default: without it the gateway does not start
+    let jwt_secret = match std::env::var("JWT_SECRET") {
+        Ok(secret) if !secret.is_empty() => secret,
+        _ => {
+            eprintln!("api-gateway: JWT_SECRET is not set (the secret that verifies bearer tokens)");
+            std::process::exit(2);
+        }
+    };
     let state = Arc::new(AppState {
         core_url: env("CORE_ENGINE_URL", "http://core-engine:8081"),
-        jwt_secret: env("JWT_SECRET", "dev-secret-change-me"),
+        jwt_secret,
         rate_limiters: DashMap::new(),
         start_time: Instant::now(),
     });
