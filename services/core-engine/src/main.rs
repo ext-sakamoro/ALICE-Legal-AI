@@ -1311,6 +1311,65 @@ mod tests {
         assert!(!inner.log.verify_chain(&unhex32(&a.audit_head)));
     }
 
+    /// under concurrent requests on a multi-thread runtime, every signed record's id names the
+    /// sequence of the audit entry that records it (the entry whose content carries its digest)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_signed_records_name_their_own_entry() {
+        let st = state();
+        let mut tasks = Vec::new();
+        for i in 0..400 {
+            let st = st.clone();
+            tasks.push(tokio::spawn(async move {
+                if i % 2 == 0 {
+                    let Json(c) = compile(st, Json(nda(&other_party())))
+                        .await
+                        .expect("compiled");
+                    Some(c.signed.expect("signed"))
+                } else {
+                    analyze(
+                        st,
+                        Json(AnalyzeRequest {
+                            document: NO_INDEMNIFICATION.to_string(),
+                            language: "en".to_string(),
+                        }),
+                    )
+                    .await
+                    .expect("analyzed");
+                    None
+                }
+            }));
+        }
+        let mut signed = Vec::new();
+        for t in tasks {
+            if let Some(s) = t.await.expect("task") {
+                signed.extend([s]);
+            }
+        }
+        assert_eq!(signed.len(), 200);
+        let Json(log) = audit(st).await;
+        assert_eq!(log.entries.len(), 400);
+        let mut mismatches = Vec::new();
+        for s in &signed {
+            let entry = log
+                .entries
+                .iter()
+                .find(|e| {
+                    serde_json::from_str::<serde_json::Value>(&e.content).expect("JSON")["digest"]
+                        == s.digest.as_str()
+                })
+                .expect("the entry of the signed record");
+            if s.id != format!("7-{}", entry.sequence) {
+                mismatches.extend([(s.id.clone(), entry.sequence)]);
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of 200 signed records name another entry: {:?}",
+            mismatches.len(),
+            &mismatches[..mismatches.len().min(5)]
+        );
+    }
+
     fn unhex32(s: &str) -> [u8; 32] {
         let v: Vec<u8> = (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex"))
