@@ -2,8 +2,6 @@
 
 AI-powered legal document analysis, template compilation, and risk scoring.
 
-**License: AGPL-3.0-or-later**
-
 ---
 
 ## Architecture
