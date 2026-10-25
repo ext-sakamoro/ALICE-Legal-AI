@@ -120,7 +120,7 @@ Compile a legal template with variable substitution.
 }
 ```
 
-When no variable is missing, the engine signs the record with its Ed25519 key (ALICE-Legal `SignedContract`). The record's metadata holds the SHA-256 of `compiled_document`; `signature` is over the record's canonical bytes and verifies under `public_key`; `issuer_did` is the `did:key` of that key (ALICE-Identity `Did::key_ed25519`). When a variable is missing, `signed` is `null`. Either way the request is one entry in the audit log, and `audit_head` is the head after it.
+When no variable is missing, the engine signs the record with its Ed25519 key (ALICE-Legal `SignedContract`). The record's metadata holds the SHA-256 of `compiled_document`; `signature` is over the record's canonical bytes and verifies under `public_key`; `issuer_did` is the `did:key` of that key (ALICE-Identity `Did::key_ed25519`). `id` is `<log_id>-<sequence>`, the sequence of the audit entry that records this compile, assigned by that entry's append (ALICE-Legal `AuditLog::append_with`); the record is signed while the log is held, so concurrent requests cannot take that sequence. When a variable is missing, `signed` is `null`. Either way the request is one entry in the audit log, and `audit_head` is the head after it.
 
 ---
 
@@ -158,8 +158,10 @@ Every analyze, risk-score and compile request the engine answers is one entry, i
 | compile | `template-compiled` | `signed` | `template_id`, `digest` (of the signed record) |
 | compile | `template-compiled` | `incomplete` | `template_id`, `missing` |
 | compile | `template-compiled` | `refused` (`reason`: `empty-template-id`, `counterparty-not-a-did` or `unknown-template`) | `template_id` |
+| analyze, risk-score | `document-analyzed` | `refused` (`reason`: `malformed-body`) | none |
+| compile | `template-compiled` | `refused` (`reason`: `malformed-body`) | none |
 
-A refused request is answered with its status code only; its entry and the head after it are in this log. `/health`, `/api/v1/legal/templates` and this endpoint are not recorded: they read no document and change nothing.
+`malformed-body` is a body the JSON extractor refuses (not JSON, a missing field, another content type); it is answered with the extractor's status. Every entry's `entity_id` is 0 (the engine has no numeric entity). A refused request is answered with its status code only; its entry and the head after it are in this log. `/health`, `/api/v1/legal/templates` and this endpoint are not recorded: they read no document and change nothing.
 
 The log is checked against a head kept outside it: keep the `audit_head` values the responses return. Against the log's own head, a truncated log still verifies. The log is held in memory and starts empty at each start of the engine.
 

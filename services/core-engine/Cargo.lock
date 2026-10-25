@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "alice-legal"
 version = "0.3.0"
-source = "git+https://github.com/ext-sakamoro/ALICE-Legal?rev=fefecbd989c695fcfda3d90022cf5a33b9856922#fefecbd989c695fcfda3d90022cf5a33b9856922"
+source = "git+https://github.com/ext-sakamoro/ALICE-Legal?rev=9490cf2049028807c7ac75df34b0cb55932f5576#9490cf2049028807c7ac75df34b0cb55932f5576"
 dependencies = [
  "alice-sign",
  "alice-zip",

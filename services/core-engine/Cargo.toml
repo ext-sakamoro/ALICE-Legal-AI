@@ -16,7 +16,7 @@ uuid = { version = "1", features = ["v4"] }
 # clause splitting, classification, risk and issues (the crate at the root of this repository)
 alice-legal-ai = { path = "../.." }
 # signed contract records and the chained audit log
-alice-legal = { git = "https://github.com/ext-sakamoro/ALICE-Legal", rev = "fefecbd989c695fcfda3d90022cf5a33b9856922", version = "0.3" }
+alice-legal = { git = "https://github.com/ext-sakamoro/ALICE-Legal", rev = "9490cf2049028807c7ac75df34b0cb55932f5576", version = "0.3" }
 # the issuer DID (did:key of the signing key) and parsing of the counterparty DID
 alice-identity = { git = "https://github.com/ext-sakamoro/ALICE-Identity", rev = "68b8141af2847ebbef87d87e9e20f46fff48b911", version = "1.2" }
 # Ed25519 key, signature and SHA-256 (the same rev alice-legal and alice-identity take)

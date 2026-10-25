@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -143,14 +143,32 @@ impl AppState {
     /// Append one entry for an answered request (its entity id is its sequence; its content is
     /// `outcome` as JSON, with sorted keys) and return the head after it.
     fn record(&self, kind: alice_legal::AuditEventKind, outcome: &serde_json::Value) -> String {
-        let content = outcome.to_string();
+        self.record_with(kind, |_, _| ((), outcome.clone())).1
+    }
+
+    /// Append one entry whose outcome is computed by `f` from the log id and the sequence the
+    /// append assigns (alice-legal `AuditLog::append_with`), all under one hold of the lock, and
+    /// return `f`'s value with the head after the entry. The entry's content is the outcome as JSON
+    /// with sorted keys; its entity id is 0 (the engine has no numeric entity).
+    fn record_with<T>(
+        &self,
+        kind: alice_legal::AuditEventKind,
+        f: impl FnOnce(u64, u64) -> (T, serde_json::Value),
+    ) -> (T, String) {
         let mut audit = self.audit.lock().expect("audit log");
-        let seq = audit.log.next_sequence;
+        let log_id = audit.log.log_id;
+        let mut out = None;
         audit
             .log
-            .append(kind, seq, &self.signer.did, &content, now_ns());
+            .append_with(kind, 0, &self.signer.did, now_ns(), |seq| {
+                let (value, outcome) = f(log_id, seq);
+                let content = outcome.to_string();
+                out = Some((value, content.clone()));
+                content
+            });
+        let (value, content) = out.expect("the content was computed");
         audit.contents.push(content);
-        hex(&audit.log.head())
+        (value, hex(&audit.log.head()))
     }
 }
 
@@ -413,11 +431,16 @@ async fn compile(
 
     // only a complete document is signed; either way the request is recorded with its outcome
     let (signed, audit_head) = if missing_variables.is_empty() {
-        let signed = sign_document(&state, &req, &compiled);
-        let head = state.record(
+        // the record's id is the sequence its entry takes, assigned by the append that records it
+        let (signed, head) = state.record_with(
             alice_legal::AuditEventKind::TemplateCompiled,
-            &json!({"request": "compile", "outcome": "signed", "template_id": req.template_id,
-                    "digest": signed.digest}),
+            |log_id, seq| {
+                let signed =
+                    sign_document(&state.signer, &req, &compiled, format!("{log_id}-{seq}"));
+                let outcome = json!({"request": "compile", "outcome": "signed",
+                                     "template_id": req.template_id, "digest": signed.digest});
+                (signed, outcome)
+            },
         );
         (Some(signed), head)
     } else {
@@ -447,18 +470,19 @@ async fn compile(
     }))
 }
 
-/// The record of a compiled document (its template and SHA-256 in the metadata), signed with the
-/// engine key. Its id is the audit sequence its entry takes.
-fn sign_document(state: &AppState, req: &CompileRequest, document: &str) -> SignedRecord {
-    let (log_id, seq) = {
-        let audit = state.audit.lock().expect("audit log");
-        (audit.log.log_id, audit.log.next_sequence)
-    };
+/// The record `id` of a compiled document (its template and SHA-256 in the metadata), signed with
+/// the engine key.
+fn sign_document(
+    signer: &Signer,
+    req: &CompileRequest,
+    document: &str,
+    id: String,
+) -> SignedRecord {
     let effective_unix = now_ns() / 1_000_000_000;
     let mut record = alice_legal::ContractRecord::new(
-        format!("{log_id}-{seq}"),
+        id,
         "template-compiled",
-        state.signer.did.clone(),
+        signer.did.clone(),
         req.counterparty_did.clone(),
         effective_unix,
     );
@@ -470,7 +494,7 @@ fn sign_document(state: &AppState, req: &CompileRequest, document: &str) -> Sign
         alice_sign::hash_data(document.as_bytes()).to_hex(),
     );
     let mut contract = alice_legal::SignedContract::new(record);
-    contract.sign(&state.signer.key);
+    contract.sign(&signer.key);
     let (public_key, signature) = contract.signatures[0];
     let r = contract.record;
     SignedRecord {
@@ -814,6 +838,60 @@ fn build_recommendations(risk_level: &str) -> Vec<String> {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+/// The engine's routes. A body the JSON extractor refuses is answered with the extractor's status
+/// and recorded as a refused request (reason `malformed-body`).
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route(
+            "/api/v1/legal/analyze",
+            post(
+                |st: State<AppState>, body: Result<Json<AnalyzeRequest>, JsonRejection>| async move {
+                    analyze(st.clone(), accepted(&st, "analyze", body)?).await
+                },
+            ),
+        )
+        .route(
+            "/api/v1/legal/compile",
+            post(
+                |st: State<AppState>, body: Result<Json<CompileRequest>, JsonRejection>| async move {
+                    compile(st.clone(), accepted(&st, "compile", body)?).await
+                },
+            ),
+        )
+        .route("/api/v1/legal/templates", get(templates))
+        .route(
+            "/api/v1/legal/risk-score",
+            post(
+                |st: State<AppState>, body: Result<Json<RiskRequest>, JsonRejection>| async move {
+                    risk_score(st.clone(), accepted(&st, "risk-score", body)?).await
+                },
+            ),
+        )
+        .route("/api/v1/legal/audit", get(audit))
+        .with_state(state)
+}
+
+/// The body, or the extractor's status after recording the refusal
+fn accepted<T>(
+    State(state): &State<AppState>,
+    request: &str,
+    body: Result<Json<T>, JsonRejection>,
+) -> Result<Json<T>, StatusCode> {
+    body.map_err(|rejection| {
+        let kind = if request == "compile" {
+            alice_legal::AuditEventKind::TemplateCompiled
+        } else {
+            alice_legal::AuditEventKind::DocumentAnalyzed
+        };
+        state.record(
+            kind,
+            &json!({"request": request, "outcome": "refused", "reason": "malformed-body"}),
+        );
+        rejection.status()
+    })
+}
+
 fn main() {
     // the configuration is read before any thread starts; without it the engine does not start
     let config = match config_from(|k| std::env::var(k).ok()) {
@@ -841,14 +919,7 @@ async fn serve(config: Config) {
     info!(issuer_did = %config.signer.did, audit_log_id = config.audit_log_id, "signing key loaded");
     let state = AppState::new(config);
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/api/v1/legal/analyze", post(analyze))
-        .route("/api/v1/legal/compile", post(compile))
-        .route("/api/v1/legal/templates", get(templates))
-        .route("/api/v1/legal/risk-score", post(risk_score))
-        .route("/api/v1/legal/audit", get(audit))
-        .with_state(state);
+    let app = router(state);
 
     let addr_str = std::env::var("LEGAL_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string());
     let addr: SocketAddr = addr_str.parse().expect("invalid LEGAL_ADDR");
@@ -1326,7 +1397,7 @@ mod tests {
                         .expect("compiled");
                     Some(c.signed.expect("signed"))
                 } else {
-                    analyze(
+                    let Json(_) = analyze(
                         st,
                         Json(AnalyzeRequest {
                             document: NO_INDEMNIFICATION.to_string(),
