@@ -2,7 +2,7 @@
 
 AI-powered legal document analysis, template compilation, and risk scoring.
 
-**License: AGPL-3.0-or-later**
+**Superseded** by [ALICE-LOL](https://github.com/ext-sakamoro/ALICE-LOL) (Legal DSL) and [ALICE-Legal](https://github.com/ext-sakamoro/ALICE-Legal). This repository is no longer developed.
 
 ---
 
