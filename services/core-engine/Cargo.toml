@@ -23,6 +23,10 @@ alice-identity = { git = "https://github.com/ext-sakamoro/ALICE-Identity", rev =
 alice-sign = { git = "https://github.com/ext-sakamoro/ALICE-Sign", rev = "8a1b00d800082187a8693732a9ffb806c98814e7", version = "0.1" }
 # wipes the seed text and bytes once the key is derived
 zeroize = "1"
+[dev-dependencies]
+# drives the router in tests (ServiceExt::oneshot)
+tower = { version = "0.5", features = ["util"] }
+
 [features]
 default = []
 [profile.release]

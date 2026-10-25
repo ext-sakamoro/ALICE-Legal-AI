@@ -1370,6 +1370,54 @@ mod tests {
         );
     }
 
+    /// a body the JSON extractor refuses is answered with its status and recorded as refused
+    #[tokio::test]
+    async fn a_malformed_body_is_recorded_as_refused() {
+        use tower::ServiceExt;
+        let cases = [
+            ("/api/v1/legal/analyze", "document-analyzed", "analyze"),
+            (
+                "/api/v1/legal/risk-score",
+                "document-analyzed",
+                "risk-score",
+            ),
+            ("/api/v1/legal/compile", "template-compiled", "compile"),
+        ];
+        for (path, kind, request) in cases {
+            for (content_type, body) in [
+                ("application/json", "{not json"),
+                ("application/json", r#"{"template_id": "nda"}"#),
+                ("text/plain", "{}"),
+            ] {
+                let st = state();
+                let response = router(st.0.clone())
+                    .oneshot(
+                        axum::http::Request::post(path)
+                            .header("content-type", content_type)
+                            .body(axum::body::Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("answered");
+                assert!(
+                    response.status().is_client_error(),
+                    "{path} {body}: {}",
+                    response.status()
+                );
+                let Json(log) = audit(st).await;
+                assert_eq!(
+                    only_entry(&log),
+                    (
+                        kind,
+                        json!({"request": request, "outcome": "refused",
+                               "reason": "malformed-body"})
+                    ),
+                    "{path} {body}"
+                );
+            }
+        }
+    }
+
     fn unhex32(s: &str) -> [u8; 32] {
         let v: Vec<u8> = (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex"))
